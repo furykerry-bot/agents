@@ -214,7 +214,7 @@ func (r *commonControl) EnsureCommitUpdated(ctx context.Context, args *EnsureFun
 				"job", klog.KObj(job), "commit", klog.KObj(commit))
 			condition = jobutil.FallbackCommitCondition(job)
 		} else {
-			log.Info("Pod exit code not yet observable for terminal job, requeueing",
+			log.Info("Pod exit code not yet observable for terminal job, requeuing",
 				"job", klog.KObj(job), "commit", klog.KObj(commit))
 			return commitConditionRequeueDuration, nil
 		}
