@@ -143,29 +143,33 @@ func setCommitRunning(status *agentsv1alpha1.CommitStatus, commit *agentsv1alpha
 }
 
 func (r *commonControl) EnsureCommitUpdated(ctx context.Context, args *EnsureFuncArgs) (time.Duration, error) {
-	log := log.FromContext(ctx)
 	commit := args.Commit
-	log.Info("EnsureCommitUpdated", "commit", klog.KObj(commit), "commitID", commit.Status.CommitID)
+	log := log.FromContext(ctx).WithValues("commit", klog.KObj(commit))
+	log.Info("EnsureCommitUpdated", "commitID", commit.Status.CommitID)
 
 	// List Jobs by LabelCommitUID since GenerateName produces a non-deterministic name.
 	jobList := &batchv1.JobList{}
 	if err := r.Client.List(ctx, jobList, client.InNamespace(commit.Namespace), client.MatchingFields{commitutil.IndexFieldCommitUID: string(commit.UID)}); err != nil {
 		return 0, fmt.Errorf("failed to list jobs: %w", err)
 	}
+	controllerKey := utils.GetControllerKey(commit)
+	for i := range jobList.Items {
+		ScaleExpectations.ObserveScale(controllerKey, expectations.Create, jobList.Items[i].Name)
+	}
 	if len(jobList.Items) == 0 {
 		// The status update that moved the Commit to Running can trigger this
 		// reconcile before the Job create event lands in the informer cache. An
 		// unsatisfied create expectation means the Job was just created: wait
 		// for it instead of finalizing, since a terminal phase is permanent.
-		if isSatisfied, unsatisfiedDuration, _ := ScaleExpectations.SatisfiedExpectations(utils.GetControllerKey(commit)); !isSatisfied {
+		if isSatisfied, unsatisfiedDuration, _ := ScaleExpectations.SatisfiedExpectations(controllerKey); !isSatisfied {
 			if unsatisfiedDuration < expectations.ExpectationTimeout {
-				log.Info("Not satisfied ScaleExpectation for Commit, wait for cache event", "commit", klog.KObj(commit))
+				log.Info("Not satisfied ScaleExpectation for Commit, wait for cache event")
 				return expectations.ExpectationTimeout - unsatisfiedDuration, nil
 			}
-			log.Info("ScaleExpectation unsatisfied overtime, proceeding", "commit", klog.KObj(commit))
-			ScaleExpectations.DeleteExpectations(utils.GetControllerKey(commit))
+			log.Info("ScaleExpectation unsatisfied overtime, proceeding")
+			ScaleExpectations.DeleteExpectations(controllerKey)
 		}
-		log.Info("Job not found, marking commit as failed", "commit", klog.KObj(commit))
+		log.Info("Job not found, marking commit as failed")
 		r.Recorder.Eventf(commit, corev1.EventTypeWarning, "JobNotFound", "Commit job not found for commit %s", commit.Name)
 		now := metav1.Now()
 		args.NewStatus.Phase = agentsv1alpha1.CommitPhaseFailed
@@ -180,7 +184,7 @@ func (r *commonControl) EnsureCommitUpdated(ctx context.Context, args *EnsureFun
 		return 0, nil
 	}
 	if len(jobList.Items) > 1 {
-		log.Info("Multiple jobs found for commit, using the latest one", "commit", klog.KObj(commit), "count", len(jobList.Items))
+		log.Info("Multiple jobs found for commit, using the latest one", "count", len(jobList.Items))
 		sort.Slice(jobList.Items, func(i, j int) bool {
 			return jobList.Items[i].CreationTimestamp.After(jobList.Items[j].CreationTimestamp.Time)
 		})
@@ -189,11 +193,11 @@ func (r *commonControl) EnsureCommitUpdated(ctx context.Context, args *EnsureFun
 
 	done, success := jobutil.IsJobCompleted(job)
 	if !done {
-		log.Info("Job still running, will requeue", "job", klog.KObj(job), "commit", klog.KObj(commit))
+		log.Info("Job still running, will requeue", "job", klog.KObj(job))
 		return defaultCommitRequeueDuration, nil
 	}
 
-	log.Info("Job completed", "job", klog.KObj(job), "commit", klog.KObj(commit), "success", success)
+	log.Info("Job completed", "job", klog.KObj(job), "success", success)
 	phase := agentsv1alpha1.CommitPhaseSucceeded
 	if !success {
 		phase = agentsv1alpha1.CommitPhaseFailed
@@ -211,11 +215,11 @@ func (r *commonControl) EnsureCommitUpdated(ctx context.Context, args *EnsureFun
 		terminalTime := jobutil.JobTerminalTime(job)
 		if terminalTime.IsZero() || time.Since(terminalTime) >= commitConditionMaxWait {
 			log.Info("Pod exit code unavailable for terminal job, using fallback condition",
-				"job", klog.KObj(job), "commit", klog.KObj(commit))
+				"job", klog.KObj(job))
 			condition = jobutil.FallbackCommitCondition(job)
 		} else {
 			log.Info("Pod exit code not yet observable for terminal job, requeuing",
-				"job", klog.KObj(job), "commit", klog.KObj(commit))
+				"job", klog.KObj(job))
 			return commitConditionRequeueDuration, nil
 		}
 	}

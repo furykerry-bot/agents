@@ -431,6 +431,10 @@ func TestEnsureCommitUpdated_JobStillRunning(t *testing.T) {
 			Active: 1,
 		},
 	}
+	controllerKey := utils.GetControllerKey(commit)
+	ScaleExpectations.ExpectScale(controllerKey, expectations.Create, jobName)
+	defer ScaleExpectations.DeleteExpectations(controllerKey)
+
 	fc := newFakeClientBuilder(scheme).WithObjects(job).Build()
 	ctrl := newCommonControlForTest(fc)
 
@@ -440,6 +444,9 @@ func TestEnsureCommitUpdated_JobStillRunning(t *testing.T) {
 	requeueAfter, err := ctrl.EnsureCommitUpdated(context.TODO(), args)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	if isSatisfied, _, pending := ScaleExpectations.SatisfiedExpectations(controllerKey); !isSatisfied {
+		t.Errorf("expected visible Job to satisfy create expectation, pending: %+v", pending)
 	}
 	// Without a Pod watch, this requeue is the only wake source for a
 	// still-running Job; a regression here strands Commits in Running.
@@ -651,8 +658,7 @@ func TestEnsureCommitRunning_Success(t *testing.T) {
 	if len(jobList.Items) != 1 {
 		t.Fatalf("expected 1 Job, got %d", len(jobList.Items))
 	}
-	// Observe the created Job so the global ScaleExpectations does not leak
-	// into later tests (the Pending-phase reconcile does this in production).
+	// This test stops before the next reconcile; clear the global expectation.
 	for _, j := range jobList.Items {
 		ScaleExpectations.ObserveScale(utils.GetControllerKey(commit), expectations.Create, j.Name)
 	}
@@ -822,8 +828,7 @@ func TestEnsureCommitRunning_WithDockerSecret(t *testing.T) {
 	if !found {
 		t.Error("expected docker-config volume in Job")
 	}
-	// Observe the created Job so the global ScaleExpectations does not leak
-	// into later tests (the Pending-phase reconcile does this in production).
+	// This test stops before the next reconcile; clear the global expectation.
 	ScaleExpectations.ObserveScale(utils.GetControllerKey(commit), expectations.Create, createdJob.Name)
 }
 
