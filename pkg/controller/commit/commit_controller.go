@@ -211,7 +211,7 @@ func (r *CommitReconciler) handleCommitPending(ctx context.Context, args *core.E
 		now := metav1.Now()
 		args.NewStatus.Phase = agentsv1alpha1.CommitPhaseFailed
 		args.NewStatus.Conditions = append(args.NewStatus.Conditions, metav1.Condition{
-			Type:               string(agentsv1alpha1.CommitConditionTypeCommitJob),
+			Type:               string(agentsv1alpha1.CommitConditionTypeCommitExecution),
 			Status:             metav1.ConditionFalse,
 			Reason:             "PodNotFound",
 			Message:            utils.TruncateConditionMessage(fmt.Sprintf("Target pod %s not found or deleting", commit.Spec.PodName)),

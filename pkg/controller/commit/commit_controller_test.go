@@ -159,7 +159,7 @@ func TestReconcile_CommitPhasePending_PodNotFound(t *testing.T) {
 	if len(updated.Status.Conditions) != 1 {
 		t.Fatalf("expected 1 condition, got %d: %+v", len(updated.Status.Conditions), updated.Status.Conditions)
 	}
-	if cond := updated.Status.Conditions[0]; cond.Type != string(agentsv1alpha1.CommitConditionTypeCommitJob) ||
+	if cond := updated.Status.Conditions[0]; cond.Type != string(agentsv1alpha1.CommitConditionTypeCommitExecution) ||
 		cond.Status != metav1.ConditionFalse || cond.Reason != "PodNotFound" {
 		t.Errorf("unexpected condition: %+v", cond)
 	}
@@ -198,7 +198,7 @@ func TestReconcile_CommitPhasePending_PodDeleting(t *testing.T) {
 	if len(updated.Status.Conditions) != 1 {
 		t.Fatalf("expected 1 condition, got %d: %+v", len(updated.Status.Conditions), updated.Status.Conditions)
 	}
-	if cond := updated.Status.Conditions[0]; cond.Type != string(agentsv1alpha1.CommitConditionTypeCommitJob) ||
+	if cond := updated.Status.Conditions[0]; cond.Type != string(agentsv1alpha1.CommitConditionTypeCommitExecution) ||
 		cond.Status != metav1.ConditionFalse || cond.Reason != "PodNotFound" {
 		t.Errorf("unexpected condition: %+v", cond)
 	}

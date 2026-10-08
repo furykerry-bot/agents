@@ -95,7 +95,7 @@ func GetCommitCondition(ctx context.Context, pod *corev1.Pod) *metav1.Condition 
 				// the commit job failed; record it instead of dropping the condition.
 				log.Info("Unknown exit code, recording generic condition", "containerID", cs.ContainerID, "exitCode", cs.State.Terminated.ExitCode)
 				return &metav1.Condition{
-					Type:               string(v1alpha1.CommitConditionTypeCommitJob),
+					Type:               string(v1alpha1.CommitConditionTypeCommitExecution),
 					Status:             metav1.ConditionFalse,
 					Reason:             "UnknownExitCode",
 					Message:            utils.TruncateConditionMessage(fmt.Sprintf("Commit job container exited with unknown code %d", cs.State.Terminated.ExitCode)),
@@ -166,9 +166,9 @@ func FallbackCommitCondition(job *batchv1.Job) *metav1.Condition {
 		}
 	}
 	return &metav1.Condition{
-		Type:               string(v1alpha1.CommitConditionTypeCommitJob),
+		Type:               string(v1alpha1.CommitConditionTypeCommitExecution),
 		Status:             metav1.ConditionFalse,
-		Reason:             "CommitJobFailed",
+		Reason:             "ExitCodeUnobservable",
 		Message:            utils.TruncateConditionMessage(message),
 		LastTransitionTime: metav1.Now(),
 	}

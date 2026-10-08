@@ -18,6 +18,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -288,8 +289,8 @@ func TestEnsureCommitUpdated_JobFailed(t *testing.T) {
 		t.Fatalf("expected 1 condition, got %d: %+v", len(newStatus.Conditions), newStatus.Conditions)
 	}
 	cond := newStatus.Conditions[0]
-	if cond.Type != string(agentsv1alpha1.CommitConditionTypeCommitJob) || cond.Status != metav1.ConditionFalse ||
-		cond.Reason != "CommitJobFailed" {
+	if cond.Type != string(agentsv1alpha1.CommitConditionTypeCommitExecution) || cond.Status != metav1.ConditionFalse ||
+		cond.Reason != "ExitCodeUnobservable" {
 		t.Errorf("unexpected fallback condition: %+v", cond)
 	}
 }
@@ -314,7 +315,7 @@ func TestEnsureCommitUpdated_JobNotFound(t *testing.T) {
 		t.Fatalf("expected 1 condition, got %d: %+v", len(newStatus.Conditions), newStatus.Conditions)
 	}
 	cond := newStatus.Conditions[0]
-	if cond.Type != string(agentsv1alpha1.CommitConditionTypeCommitJob) || cond.Status != metav1.ConditionFalse ||
+	if cond.Type != string(agentsv1alpha1.CommitConditionTypeCommitExecution) || cond.Status != metav1.ConditionFalse ||
 		cond.Reason != "JobNotFound" {
 		t.Errorf("unexpected condition: %+v", cond)
 	}
@@ -547,9 +548,52 @@ func TestEnsureCommitUpdated_TerminalJobWaitExpired(t *testing.T) {
 		t.Fatalf("expected 1 condition, got %d: %+v", len(newStatus.Conditions), newStatus.Conditions)
 	}
 	cond := newStatus.Conditions[0]
-	if cond.Type != string(agentsv1alpha1.CommitConditionTypeCommitJob) || cond.Status != metav1.ConditionFalse ||
-		cond.Reason != "CommitJobFailed" || cond.Message != "Job was active longer than specified deadline" {
+	if cond.Type != string(agentsv1alpha1.CommitConditionTypeCommitExecution) || cond.Status != metav1.ConditionFalse ||
+		cond.Reason != "ExitCodeUnobservable" || cond.Message != "Job was active longer than specified deadline" {
 		t.Errorf("unexpected fallback condition: %+v", cond)
+	}
+}
+
+func TestEnsureCommitUpdated_PodListErrorDefersFinalization(t *testing.T) {
+	scheme := newTestScheme()
+	commit := newTestCommit("test-commit", "default")
+
+	// The Job has been terminal beyond the bounded wait, but the pod List fails:
+	// the error must propagate for retry instead of falling back, since a
+	// transient error does not prove the pod is unavailable.
+	expired := metav1.NewTime(metav1.Now().Add(-2 * time.Minute))
+	failedJob := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "commit-expired",
+			Namespace: "default",
+			Labels: map[string]string{
+				commitutil.LabelCommitUID: string(commit.UID),
+			},
+		},
+		Status: batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{
+				{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, LastTransitionTime: expired, Message: "Job was active longer than specified deadline"},
+			},
+		},
+	}
+	fc := newFakeClientBuilder(scheme).WithObjects(failedJob).Build()
+	ctrl := newCommonControlForTest(&listErrorClient{Client: fc, listErr: fmt.Errorf("cache list failed")})
+
+	newStatus := commit.Status.DeepCopy()
+	args := &EnsureFuncArgs{Commit: commit, NewStatus: newStatus}
+
+	requeueAfter, err := ctrl.EnsureCommitUpdated(context.TODO(), args)
+	if err == nil {
+		t.Fatal("expected pod list error to propagate, got nil")
+	}
+	if requeueAfter != 0 {
+		t.Errorf("expected zero requeue on error, got %v", requeueAfter)
+	}
+	if len(newStatus.Conditions) != 0 {
+		t.Errorf("expected no condition on error path, got %+v", newStatus.Conditions)
+	}
+	if newStatus.Phase != agentsv1alpha1.CommitPhasePending {
+		t.Errorf("expected phase to stay %s, got %s", agentsv1alpha1.CommitPhasePending, newStatus.Phase)
 	}
 }
 
@@ -688,8 +732,8 @@ func TestEnsureCommitRunning_MissingJobImage(t *testing.T) {
 		t.Fatalf("expected 1 condition, got %d: %+v", len(newStatus.Conditions), newStatus.Conditions)
 	}
 	cond := newStatus.Conditions[0]
-	if cond.Type != string(agentsv1alpha1.CommitConditionTypeCommitJob) || cond.Status != metav1.ConditionFalse ||
-		cond.Reason != "JobGenerationFailed" {
+	if cond.Type != string(agentsv1alpha1.CommitConditionTypeCommitExecution) || cond.Status != metav1.ConditionFalse ||
+		cond.Reason != "JobCreationFailed" {
 		t.Errorf("unexpected condition: %+v", cond)
 	}
 }
@@ -871,6 +915,7 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 	tests := []struct {
 		name         string
 		pods         []corev1.Pod
+		listErr      error
 		expectNil    bool
 		expectType   string
 		expectStatus metav1.ConditionStatus
@@ -880,6 +925,10 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 			name:      "no pods",
 			pods:      nil,
 			expectNil: true,
+		},
+		{
+			name:    "pod list error propagates for retry",
+			listErr: fmt.Errorf("cache list failed"),
 		},
 		{
 			name: "exit code 0 - success",
@@ -997,7 +1046,7 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 				},
 			},
 			expectNil:    false,
-			expectType:   "CommitJob",
+			expectType:   "CommitExecution",
 			expectStatus: metav1.ConditionFalse,
 			expectReason: "UnknownExitCode",
 		},
@@ -1037,12 +1086,26 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 			for i := range tt.pods {
 				builder = builder.WithObjects(&tt.pods[i])
 			}
-			fc := builder.Build()
-			ctrl := newCommonControlForTest(fc)
+			var c client.Client = builder.Build()
+			if tt.listErr != nil {
+				c = &listErrorClient{Client: c, listErr: tt.listErr}
+			}
+			ctrl := newCommonControlForTest(c)
 
 			commit := newTestCommit("test-commit", "default")
-			condition := ctrl.getLatestJobPodExitCode(context.TODO(), commit)
-
+			condition, err := ctrl.getLatestJobPodExitCode(context.TODO(), commit)
+			if tt.listErr != nil {
+				if !errors.Is(err, tt.listErr) {
+					t.Fatalf("expected list error %v, got %v", tt.listErr, err)
+				}
+				if condition != nil {
+					t.Errorf("expected nil condition on list error, got %+v", condition)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
 			if tt.expectNil {
 				if condition != nil {
 					t.Errorf("expected nil condition, got %+v", condition)
@@ -1076,6 +1139,20 @@ type createErrorClient struct {
 
 func (c *createErrorClient) Create(_ context.Context, _ client.Object, _ ...client.CreateOption) error {
 	return c.createErr
+}
+
+// listErrorClient wraps a client.Client and returns a fixed error on Pod List,
+// leaving other lists untouched. Used to simulate transient cache failures.
+type listErrorClient struct {
+	client.Client
+	listErr error
+}
+
+func (c *listErrorClient) List(_ context.Context, list client.ObjectList, _ ...client.ListOption) error {
+	if _, ok := list.(*corev1.PodList); ok {
+		return c.listErr
+	}
+	return c.Client.List(context.Background(), list)
 }
 
 func TestEnsureCommitRunning_EmptyContainerID(t *testing.T) {
@@ -1124,8 +1201,8 @@ func TestEnsureCommitRunning_EmptyContainerID(t *testing.T) {
 		t.Fatalf("expected 1 condition, got %d: %+v", len(newStatus.Conditions), newStatus.Conditions)
 	}
 	cond := newStatus.Conditions[0]
-	if cond.Type != string(agentsv1alpha1.CommitConditionTypeCommitJob) || cond.Status != metav1.ConditionFalse ||
-		cond.Reason != "JobGenerationFailed" {
+	if cond.Type != string(agentsv1alpha1.CommitConditionTypeCommitExecution) || cond.Status != metav1.ConditionFalse ||
+		cond.Reason != "JobCreationFailed" {
 		t.Errorf("unexpected condition: %+v", cond)
 	}
 }

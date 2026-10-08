@@ -43,10 +43,10 @@ const (
 	CommitConditionTypePullBaseImage CommitConditionType = "PullBaseImage"
 	// CommitConditionTypePushCommittedImage indicates whether the committed image push step succeeded.
 	CommitConditionTypePushCommittedImage CommitConditionType = "PushCommittedImage"
-	// CommitConditionTypeCommitJob reports the overall commit Job outcome when the
-	// container exit code cannot be resolved: unknown exit code, missing Job pod,
-	// or the Job itself missing or failing to be generated.
-	CommitConditionTypeCommitJob CommitConditionType = "CommitJob"
+	// CommitConditionTypeCommitExecution reports the overall commit execution
+	// outcome when it cannot be attributed to a specific step: unknown exit
+	// code, missing Job pod, or the Job itself missing or failing to be created.
+	CommitConditionTypeCommitExecution CommitConditionType = "CommitExecution"
 )
 
 type CommitSpec struct {

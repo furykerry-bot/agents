@@ -100,14 +100,14 @@ func (r *commonControl) EnsureCommitRunning(ctx context.Context, args *EnsureFun
 	job, err := g.GenerateCommitJob()
 	if err != nil {
 		log.Error(err, "failed to generate commit job", "commit", klog.KObj(commit))
-		r.Recorder.Eventf(commit, corev1.EventTypeWarning, "JobGenerationFailed", "Failed to generate commit job: %v", err)
+		r.Recorder.Eventf(commit, corev1.EventTypeWarning, "JobCreationFailed", "Failed to generate commit job: %v", err)
 		now := metav1.Now()
 		args.NewStatus.StartTime = &now
 		args.NewStatus.Phase = agentsv1alpha1.CommitPhaseFailed
 		args.NewStatus.Conditions = append(args.NewStatus.Conditions, metav1.Condition{
-			Type:               string(agentsv1alpha1.CommitConditionTypeCommitJob),
+			Type:               string(agentsv1alpha1.CommitConditionTypeCommitExecution),
 			Status:             metav1.ConditionFalse,
-			Reason:             "JobGenerationFailed",
+			Reason:             "JobCreationFailed",
 			Message:            utils.TruncateConditionMessage(err.Error()),
 			LastTransitionTime: now,
 		})
@@ -174,7 +174,7 @@ func (r *commonControl) EnsureCommitUpdated(ctx context.Context, args *EnsureFun
 		now := metav1.Now()
 		args.NewStatus.Phase = agentsv1alpha1.CommitPhaseFailed
 		args.NewStatus.Conditions = append(args.NewStatus.Conditions, metav1.Condition{
-			Type:               string(agentsv1alpha1.CommitConditionTypeCommitJob),
+			Type:               string(agentsv1alpha1.CommitConditionTypeCommitExecution),
 			Status:             metav1.ConditionFalse,
 			Reason:             "JobNotFound",
 			Message:            "Commit job not found",
@@ -202,16 +202,24 @@ func (r *commonControl) EnsureCommitUpdated(ctx context.Context, args *EnsureFun
 	if !success {
 		phase = agentsv1alpha1.CommitPhaseFailed
 	}
-	condition := r.getLatestJobPodExitCode(ctx, commit)
+	condition, err := r.getLatestJobPodExitCode(ctx, commit)
+	if err != nil {
+		// Transient Kubernetes errors must remain retryable: a List failure says
+		// nothing about the pod's observability, and finalizing here with the
+		// Job-derived fallback would make a transient error permanently drop the
+		// exit-code condition. Terminal statuses are never recomputed.
+		return 0, fmt.Errorf("failed to get job pod exit code: %w", err)
+	}
 	if condition == nil {
-		// The Job and Pod informer caches are not synchronized: the Job may be
-		// observed terminal before the pod's terminated state is visible. Defer
-		// the terminal transition so the exit-code condition is not lost; once
-		// the bounded wait expires (e.g. the pod was deleted), fall back to a
-		// condition derived from the Job status. A zero terminal time is
-		// deliberately treated as already expired: real Job controller objects
-		// always stamp it, so this only happens for hand-crafted or partially
-		// observed statuses where waiting has no anchor.
+		// A successful List confirmed that the pod or its terminated state is
+		// unavailable. The Job and Pod informer caches are not synchronized: the
+		// Job may be observed terminal before the pod's terminated state is
+		// visible. Defer the terminal transition so the exit-code condition is
+		// not lost; once the bounded wait expires (e.g. the pod was deleted),
+		// fall back to a condition derived from the Job status. A zero terminal
+		// time is deliberately treated as already expired: real Job controller
+		// objects always stamp it, so this only happens for hand-crafted or
+		// partially observed statuses where waiting has no anchor.
 		terminalTime := jobutil.JobTerminalTime(job)
 		if terminalTime.IsZero() || time.Since(terminalTime) >= commitConditionMaxWait {
 			log.Info("Pod exit code unavailable for terminal job, using fallback condition",
@@ -287,22 +295,22 @@ func (r *commonControl) listCRJobPods(ctx context.Context, commit *agentsv1alpha
 	return jobPods, nil
 }
 
-func (r *commonControl) getLatestJobPodExitCode(ctx context.Context, commit *agentsv1alpha1.Commit) *metav1.Condition {
+func (r *commonControl) getLatestJobPodExitCode(ctx context.Context, commit *agentsv1alpha1.Commit) (*metav1.Condition, error) {
 	log := log.FromContext(ctx)
 	jobPods, err := r.listCRJobPods(ctx, commit)
 	if err != nil {
-		// Treated as "not observable" rather than retryable: the caller's
-		// bounded wait and Job-derived fallback keep a persistent List error
-		// from wedging the Commit in Running forever.
-		log.Error(err, "list job pods failed", "commit", klog.KObj(commit))
-		return nil
+		// Propagate so reconciliation retries: an error does not prove the pod
+		// or its terminated state is unavailable, and terminal conditions are
+		// permanent. The caller's bounded wait and fallback only apply after a
+		// successful List confirms unavailability.
+		return nil, err
 	}
 	if jobPods == nil || len(jobPods.Items) == 0 {
 		log.Info("job pods not found", "commit", klog.KObj(commit))
-		return nil
+		return nil, nil
 	}
 	sort.Slice(jobPods.Items, func(i, j int) bool {
 		return jobPods.Items[i].CreationTimestamp.After(jobPods.Items[j].CreationTimestamp.Time)
 	})
-	return jobutil.GetCommitCondition(ctx, &jobPods.Items[0])
+	return jobutil.GetCommitCondition(ctx, &jobPods.Items[0]), nil
 }

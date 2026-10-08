@@ -117,7 +117,7 @@ var _ = Describe("Commit", func() {
 			// The terminal phase must carry a condition explaining the failure
 			// (written in the same status update as the phase transition).
 			verifyCommitCondition(ctx, namespace, commit.Name,
-				agentsv1alpha1.CommitConditionTypeCommitJob, metav1.ConditionFalse, "PodNotFound")
+				agentsv1alpha1.CommitConditionTypeCommitExecution, metav1.ConditionFalse, "PodNotFound")
 		})
 	})
 
